@@ -1,0 +1,13 @@
+venv/
+.venv/
+__pycache__/
+.env
+*.parquet
+*.csv
+.dlt/
+.vscode/
+logs/
+target/
+**/target/
+**/logs/
+.pytest_cache/
