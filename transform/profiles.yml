@@ -1,0 +1,12 @@
+nba_lakehouse:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: "{{ env_var('POSTGRES_HOST', '127.0.0.1') }}"
+      port: "{{ env_var('POSTGRES_PORT', '5433') | int }}"
+      user: "{{ env_var('POSTGRES_USER', 'admin') }}"
+      password: "{{ env_var('POSTGRES_PASSWORD', 'adminpassword') }}"
+      dbname: "{{ env_var('POSTGRES_DB', 'lakehouse') }}"
+      schema: analytics
+      threads: 4
