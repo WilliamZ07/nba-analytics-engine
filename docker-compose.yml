@@ -16,15 +16,27 @@ services:
       timeout: 5s
       retries: 12
 
-  ingest:
+  api:
     build: .
-    command: ["python", "-m", "ingestion.pipeline"]
-    environment:
+    command: ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment: &database_environment
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
       POSTGRES_DB: ${POSTGRES_DB:-lakehouse}
       POSTGRES_USER: ${POSTGRES_USER:-admin}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-adminpassword}
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    profiles: ["api"]
+
+  ingest:
+    build: .
+    command: ["python", "-m", "ingestion.pipeline"]
+    environment:
+      <<: *database_environment
       DESTINATION__POSTGRES__CREDENTIALS: postgresql://${POSTGRES_USER:-admin}:${POSTGRES_PASSWORD:-adminpassword}@postgres:5432/${POSTGRES_DB:-lakehouse}
     depends_on:
       postgres:
@@ -34,12 +46,7 @@ services:
   transform:
     build: .
     command: ["dbt", "build", "--project-dir", "/app/transform", "--profiles-dir", "/app/transform"]
-    environment:
-      POSTGRES_HOST: postgres
-      POSTGRES_PORT: 5432
-      POSTGRES_DB: ${POSTGRES_DB:-lakehouse}
-      POSTGRES_USER: ${POSTGRES_USER:-admin}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-adminpassword}
+    environment: *database_environment
     depends_on:
       postgres:
         condition: service_healthy
