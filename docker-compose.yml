@@ -27,6 +27,8 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-adminpassword}
     ports:
       - "8000:8000"
+    volumes:
+      - .:/app
     depends_on:
       postgres:
         condition: service_healthy
@@ -38,6 +40,8 @@ services:
     environment:
       <<: *database_environment
       DESTINATION__POSTGRES__CREDENTIALS: postgresql://${POSTGRES_USER:-admin}:${POSTGRES_PASSWORD:-adminpassword}@postgres:5432/${POSTGRES_DB:-lakehouse}
+    volumes:
+      - .:/app
     depends_on:
       postgres:
         condition: service_healthy
@@ -47,6 +51,8 @@ services:
     build: .
     command: ["dbt", "build", "--project-dir", "/app/transform", "--profiles-dir", "/app/transform"]
     environment: *database_environment
+    volumes:
+      - .:/app
     depends_on:
       postgres:
         condition: service_healthy

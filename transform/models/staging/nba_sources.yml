@@ -1,0 +1,16 @@
+version: 2
+
+sources:
+  - name: raw_nba
+    description: Automatically created and evolved by the dlt ingestion job.
+    schema: raw_nba
+    tables:
+      - name: player_game_logs
+        description: Player-level box-score logs returned by the NBA Stats API.
+        columns:
+          - name: game_id
+            tests:
+              - not_null
+          - name: player_id
+            tests:
+              - not_null
