@@ -1,0 +1,20 @@
+version: 2
+
+models:
+  - name: stg_nba__player_game_logs
+    description: Standardized NBA player box scores from the raw dlt-loaded data.
+    columns:
+      - name: game_id
+        tests:
+          - not_null
+      - name: player_id
+        tests:
+          - not_null
+
+  - name: player_game_stats
+    description: Curated player-game fact table used by the API.
+    columns:
+      - name: player_game_id
+        tests:
+          - unique
+          - not_null

@@ -1,81 +1,109 @@
-# NBA Lakehouse API
+# NBA Analytics Engine
 
-A local-first NBA analytics platform that loads player-level box scores from the NBA Stats API, automatically lands the raw data in PostgreSQL, transforms it with dbt, and exposes curated statistics through FastAPI.
+A local-first NBA analytics platform that extracts player box scores from the NBA Stats API, automatically loads raw records into PostgreSQL with schema inference, transforms data into analytical marts using dbt, and serves curated statistics through FastAPI.
 
-It is intentionally designed as a strong portfolio project without a cloud bill. The same boundaries also make a later deployment straightforward: replace local PostgreSQL with a managed warehouse, schedule the two jobs, and deploy the API as a container.
+It is intentionally designed as a reproducible, zero-cost data platform without requiring active cloud infrastructure.
+
+---
 
 ## Architecture
 
 ```text
 NBA Stats API
-    |  nba_api
-    v
-dlt ingestion job  --->  PostgreSQL: raw_nba (automatic schema inference)
-                                  |
-                                  | dbt build
-                                  v
-                         PostgreSQL: analytics.player_game_stats
-                                  |
-                                  v
-                           FastAPI read API
+    │
+    │  nba_api (Python)
+    ▼
+dlt Ingestion Job  ───►  PostgreSQL (raw_nba.player_game_logs)
+                               │
+                               │  dbt build
+                               ▼
+                         PostgreSQL (analytics schema)
+                           ├── stg_nba__player_game_logs
+                           ├── player_game_stats
+                           ├── dim_player_season_summary
+                           └── dim_team_summary
+                               │
+                               ▼
+                         FastAPI Read API
 ```
 
-`dlt` owns raw-table creation and schema evolution. dbt owns the business-facing data model. This separation is deliberate: raw API contracts change, while API consumers need stable curated columns.
+* **Extraction & Ingestion:** `dlt` handles pipeline execution, automatic schema inference, and idempotent table merging.
+* **Transformation & Data Modeling:** `dbt` standardizes field types, enforces relational integrity, and models dimensional summaries with calculated metrics like True Shooting Percentage (TS%) and team win percentages.
+* **Serving Layer:** `FastAPI` exposes parameterized SQL queries via REST endpoints.
 
-## Stack
+---
 
-- Python and `nba_api` for extraction
-- `dlt` for loading and automatic raw-schema inference
-- PostgreSQL 16 for the local warehouse
-- dbt-postgres for tested analytics transformations
-- FastAPI and parameterized SQL for the serving layer
-- Docker Compose for a reproducible local environment
+## Tech Stack
 
-## Run locally
+* **Ingestion:** Python 3.12, `dlt`, `nba_api`
+* **Warehouse:** PostgreSQL 16 (Alpine)
+* **Transformation:** `dbt-postgres`
+* **Serving Layer:** FastAPI, Uvicorn, Psycopg2
+* **Infrastructure:** Docker Compose
 
-Prerequisites: Docker Desktop and Python 3.12+ (Python is only needed if you prefer running jobs outside Docker).
+---
 
-1. Optionally copy `.env.example` to `.env` and change the local-only credentials.
-2. Start the database:
+## Run Locally
 
-   ```powershell
-   docker compose up -d postgres
-   ```
+### Prerequisites
+* Docker Desktop
+* Python 3.12+ (optional, if executing jobs outside Docker)
 
-3. Load a season. The composite player-game key makes reruns idempotent while retaining previously loaded seasons:
+### 1. Environment Configuration
+Copy the local environment template:
+```powershell
+cp .env.example .env
+```
 
-   ```powershell
-   docker compose run --rm ingest python -m ingestion.pipeline --season 2024-25
-   ```
+### 2. Start PostgreSQL Database
+```powershell
+docker compose up -d postgres
+```
 
-4. Build and test the curated dbt models:
+### 3. Ingest Season Data
+Extract and load player game logs for a given NBA season:
+```powershell
+docker compose run --rm ingest python -m ingestion.pipeline --season 2024-25
+```
 
-   ```powershell
-   docker compose run --rm transform
-   ```
+### 4. Build and Test Analytics Models
+Compile and materialize staging views, base fact tables, and dimensional summary marts:
+```powershell
+docker compose run --rm transform dbt build --project-dir /app/transform --profiles-dir /app/transform
+```
 
-5. Start the API and open the interactive docs at <http://localhost:8000/docs>:
-
-   ```powershell
-   docker compose --profile api up -d api
-   ```
+### 5. Launch Serving Layer
+Start the API service and access interactive documentation at `http://localhost:8000/docs`:
+```powershell
+docker compose --profile api up -d api
+```
 
 Example endpoints:
-
 ```text
 GET /health
 GET /players?season=2024-25&search=Nikola
 GET /players/203999/games?season=2024-25
 ```
 
-To run the jobs from the host instead, create a virtual environment, install `requirements.txt`, keep Postgres running, then run `python -m ingestion.pipeline --season 2024-25` and `dbt build --project-dir transform --profiles-dir transform`.
+---
 
-## Project scope and next increments
+## Data Models (v0.2.1)
 
-This first vertical slice deliberately uses player game logs because it proves an end-to-end data contract while remaining fast to operate. Add complexity in focused increments:
+* `analytics.stg_nba__player_game_logs`: Staging view normalizing and casting raw source columns.
+* `analytics.player_game_stats`: Base fact table containing player-game box scores with a composite primary key (`game_id-player_id`).
+* `analytics.dim_player_season_summary`: Player-level aggregations containing games played, win/loss records, per-game averages (PPG, RPG, APG, SPG, BPG, TPG), and True Shooting Percentage (TS%).
+* `analytics.dim_team_summary`: Team-level seasonal aggregations containing games played, records (wins, losses, win percentage), and team points per game.
 
-1. Add game, team, and player dimension models; retain raw source data untouched.
-2. Add a second extraction resource for box-score detail or play-by-play, then model it as an event fact table.
-3. Add an orchestrator (Prefect or Airflow) only when there are multiple scheduled, monitored jobs.
-4. Add API integration tests, pagination, caching, and a small frontend dashboard.
-5. Deploy only after the local product is stable—e.g. API container on Render/Fly.io and managed Postgres or BigQuery. Keep the Terraform/AWS layer as an optional extension, not the project prerequisite.
+---
+
+## Incremental Roadmap
+
+* [x] **v0.1.0** — Local ELT baseline (`dlt` + `dbt`), PostgreSQL container, and FastAPI read endpoints.
+* [ ] **v0.2.0** — Analytics & Data Quality Layer:
+  * [x] **v0.2.1** — Player and Team seasonal summary marts with True Shooting calculations.
+  * [ ] **v0.2.2** — 10-game rolling window calculations and scoring surge differentials.
+  * [ ] **v0.2.3** — Model schema assertions, uniqueness checks, and data quality tests.
+  * [ ] **v0.2.4** — REST API serving layer expansion for summaries, standings, and leaders.
+  * [ ] **v0.2.5** — Automated integration testing with `pytest`.
+* [ ] **v0.3.0** — Automated pipeline orchestration, logging, and Redis caching.
+* [ ] **v0.4.0** — Web dashboard and zero-cost cloud deployment.
