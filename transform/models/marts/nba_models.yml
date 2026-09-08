@@ -18,3 +18,37 @@ models:
         tests:
           - unique
           - not_null
+      - name: points
+        tests:
+          - not_null
+
+  - name: dim_player_season_summary
+    description: Aggregated regular season metrics by player.
+    columns:
+      - name: player_id
+        tests:
+          - not_null
+      - name: season_id
+        tests:
+          - not_null
+      - name: true_shooting_pct
+        tests:
+          - not_null
+
+  - name: dim_team_summary
+    description: Team-level win/loss records and scoring averages.
+    columns:
+      - name: team_id
+        tests:
+          - not_null
+      - name: season_id
+        tests:
+          - not_null
+
+  - name: fct_player_rolling_stats
+    description: Rolling 10-game window calculations and scoring differential metrics.
+    columns:
+      - name: player_game_id
+        tests:
+          - unique
+          - not_null
