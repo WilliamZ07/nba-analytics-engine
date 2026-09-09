@@ -5,3 +5,5 @@ psycopg2-binary>=2.9,<3
 python-dotenv>=1.0,<2
 nba_api>=1.6,<2
 dbt-postgres>=1.8,<2
+pytest
+httpx

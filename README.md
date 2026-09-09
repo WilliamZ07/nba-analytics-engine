@@ -21,14 +21,15 @@ dlt Ingestion Job  ───►  PostgreSQL (raw_nba.player_game_logs)
                            ├── stg_nba__player_game_logs
                            ├── player_game_stats
                            ├── dim_player_season_summary
-                           └── dim_team_summary
+                           ├── dim_team_summary
+                           └── fct_player_rolling_stats
                                │
                                ▼
                          FastAPI Read API
 ```
 
-* **Extraction & Ingestion:** `dlt` handles pipeline execution, automatic schema inference, and idempotent table merging.
-* **Transformation & Data Modeling:** `dbt` standardizes field types, enforces relational integrity, and models dimensional summaries with calculated metrics like True Shooting Percentage (TS%) and team win percentages.
+* **Extraction & Ingestion:** `dlt` handles pipeline execution, automatic schema inference, and idempotent table merging (`write_disposition="merge"`).
+* **Transformation & Data Modeling:** `dbt` standardizes field types, enforces relational integrity, and models dimensional summaries with calculated metrics like True Shooting Percentage ($TS\%$), 10-game rolling windows, and scoring surge differentials.
 * **Serving Layer:** `FastAPI` exposes parameterized SQL queries via REST endpoints.
 
 ---
@@ -39,6 +40,7 @@ dlt Ingestion Job  ───►  PostgreSQL (raw_nba.player_game_logs)
 * **Warehouse:** PostgreSQL 16 (Alpine)
 * **Transformation:** `dbt-postgres`
 * **Serving Layer:** FastAPI, Uvicorn, Psycopg2
+* **Testing:** `dbt test`, `pytest`, `httpx`
 * **Infrastructure:** Docker Compose
 
 ---
@@ -67,7 +69,7 @@ docker compose run --rm ingest python -m ingestion.pipeline --season 2024-25
 ```
 
 ### 4. Build and Test Analytics Models
-Compile and materialize staging views, base fact tables, and dimensional summary marts:
+Compile, materialize, and run schema assertion tests across staging views, base fact tables, and dimensional summary marts:
 ```powershell
 docker compose run --rm transform dbt build --project-dir /app/transform --profiles-dir /app/transform
 ```
@@ -78,32 +80,46 @@ Start the API service and access interactive documentation at `http://localhost:
 docker compose --profile api up -d api
 ```
 
-Example endpoints:
-```text
-GET /health
-GET /players?season=2024-25&search=Nikola
-GET /players/203999/games?season=2024-25
+### 6. Run Integration Test Suite
+Execute the automated endpoint contract tests:
+```powershell
+docker compose run --rm api pytest tests/
 ```
 
 ---
 
-## Data Models (v0.2.1)
+## API Endpoints
+
+| Method | Endpoint | Description | Query Parameters |
+| :--- | :--- | :--- | :--- |
+| `GET` | `/health` | Service and database connectivity check | None |
+| `GET` | `/players` | Player season averages & $TS\%$ | `season`, `search`, `limit` |
+| `GET` | `/players/{player_id}/summary` | Career/season stat totals and shooting metrics | `season` |
+| `GET` | `/players/{player_id}/games` | Game log with 10-game rolling averages & surge | `season`, `limit` |
+| `GET` | `/teams` | Regular season team standings and records | `season` |
+| `GET` | `/teams/{team_id}/leaders` | Top scoring leaders for a specific team | `season`, `limit` |
+| `GET` | `/analytics/surging-players` | Players with highest 10-game positive surge | `season`, `limit` |
+
+---
+
+## Data Models (v0.2.0)
 
 * `analytics.stg_nba__player_game_logs`: Staging view normalizing and casting raw source columns.
 * `analytics.player_game_stats`: Base fact table containing player-game box scores with a composite primary key (`game_id-player_id`).
-* `analytics.dim_player_season_summary`: Player-level aggregations containing games played, win/loss records, per-game averages (PPG, RPG, APG, SPG, BPG, TPG), and True Shooting Percentage (TS%).
+* `analytics.dim_player_season_summary`: Player-level aggregations containing games played, win/loss records, per-game averages (PPG, RPG, APG, SPG, BPG, TPG), and True Shooting Percentage ($TS\%$).
 * `analytics.dim_team_summary`: Team-level seasonal aggregations containing games played, records (wins, losses, win percentage), and team points per game.
+* `analytics.fct_player_rolling_stats`: Analytical fact table containing trailing 10-game rolling averages and scoring surge differential metrics calculated via SQL window functions.
 
 ---
 
 ## Incremental Roadmap
 
 * [x] **v0.1.0** — Local ELT baseline (`dlt` + `dbt`), PostgreSQL container, and FastAPI read endpoints.
-* [ ] **v0.2.0** — Analytics & Data Quality Layer:
+* [x] **v0.2.0** — Analytics & Data Quality Layer:
   * [x] **v0.2.1** — Player and Team seasonal summary marts with True Shooting calculations.
-  * [ ] **v0.2.2** — 10-game rolling window calculations and scoring surge differentials.
-  * [ ] **v0.2.3** — Model schema assertions, uniqueness checks, and data quality tests.
-  * [ ] **v0.2.4** — REST API serving layer expansion for summaries, standings, and leaders.
-  * [ ] **v0.2.5** — Automated integration testing with `pytest`.
-* [ ] **v0.3.0** — Automated pipeline orchestration, logging, and Redis caching.
+  * [x] **v0.2.2** — 10-game rolling window calculations and scoring surge differentials.
+  * [x] **v0.2.3** — Model schema assertions, uniqueness checks, and data quality tests (14 tests passing).
+  * [x] **v0.2.4** — REST API serving layer expansion for summaries, standings, and leaders.
+  * [x] **v0.2.5** — Automated integration testing with `pytest`.
+* [ ] **v0.3.0** — Pipeline automation, logging, retries, and Redis caching.
 * [ ] **v0.4.0** — Web dashboard and zero-cost cloud deployment.
