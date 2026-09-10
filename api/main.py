@@ -1,5 +1,6 @@
 """HTTP interface for curated NBA analytics data."""
 from __future__ import annotations
+from api.cache import cache_endpoint
 
 import logging
 from typing import Annotated, Any
@@ -15,8 +16,8 @@ MAX_LIMIT = 100
 
 app = FastAPI(
     title="NBA Lakehouse API",
-    version="0.2.0",
-    description="Read-only endpoints backed by dbt-curated NBA analytics marts.",
+    version="0.3.0",
+    description="Read-only endpoints backed by dbt-curated NBA analytics marts and Redis caching.",
 )
 
 
@@ -42,7 +43,7 @@ def fetch_all(query: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
 
 @app.get("/", tags=["platform"])
 def read_root() -> dict[str, str]:
-    return {"status": "healthy", "service": "nba-lakehouse-api", "version": "0.2.0"}
+    return {"status": "healthy", "service": "nba-lakehouse-api", "version": "0.3.0"}
 
 
 @app.get("/health", tags=["platform"])
@@ -52,6 +53,7 @@ def health_check() -> dict[str, str]:
 
 
 @app.get("/players", tags=["players"])
+@cache_endpoint(ttl_seconds=1800)
 def list_players(
     season: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}$"),
     search: str | None = Query(default=None, min_length=2, max_length=80),
@@ -81,6 +83,7 @@ def list_players(
 
 
 @app.get("/players/{player_id}/summary", tags=["players"])
+@cache_endpoint(ttl_seconds=1800)
 def player_season_summary(
     player_id: int,
     season: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}$"),
@@ -114,6 +117,7 @@ def player_season_summary(
 
 
 @app.get("/players/{player_id}/games", tags=["players"])
+@cache_endpoint(ttl_seconds=900)
 def player_game_log(
     player_id: int,
     season: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}$"),
@@ -147,6 +151,7 @@ def player_game_log(
 
 
 @app.get("/teams", tags=["teams"])
+@cache_endpoint(ttl_seconds=3600)
 def list_teams(
     season: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}$"),
 ) -> list[dict[str, Any]]:
@@ -171,6 +176,7 @@ def list_teams(
 
 
 @app.get("/teams/{team_id}/leaders", tags=["teams"])
+@cache_endpoint(ttl_seconds=3600)
 def team_stat_leaders(
     team_id: int,
     season: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}$"),
@@ -199,6 +205,7 @@ def team_stat_leaders(
 
 
 @app.get("/analytics/surging-players", tags=["analytics"])
+@cache_endpoint(ttl_seconds=600)
 def surging_players(
     season: str = Query(default="2024-25", pattern=r"^\d{4}-\d{2}$"),
     limit: Annotated[int, Query(ge=1, le=MAX_LIMIT)] = 10,
