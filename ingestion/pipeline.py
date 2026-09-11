@@ -1,129 +1,128 @@
-"""Load NBA player game logs into PostgreSQL with automatic schema inference.
-
-Run from the repository root:
-    python -m ingestion.pipeline --season 2024-25
-
-``dlt`` creates and evolves the ``raw_nba`` schema; no hand-written raw-table DDL is required.
-The transformation layer owns the curated analytics schema.
-"""
-
+"""Extracts NBA player game logs and loads raw records into PostgreSQL via dlt."""
 from __future__ import annotations
 
 import argparse
 import logging
-import os
-from collections.abc import Iterator
-from typing import Any
-from urllib.parse import quote
+import sys
+from json import JSONDecodeError
+from typing import Any, Iterator
 
 import dlt
-from dotenv import load_dotenv
+import requests
+from nba_api.stats.endpoints import playergamelogs
+from tenacity import (
+    before_sleep_log,
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_random_exponential,
+)
 
-LOGGER = logging.getLogger(__name__)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+LOGGER = logging.getLogger("ingestion.pipeline")
 
-DEFAULT_SEASON = "2024-25"
-SEASON_TYPES = ("Regular Season", "Playoffs", "Pre Season", "All Star")
+# Full header profile matching modern browser sessions to prevent Akamai throttling
+NBA_API_HEADERS = {
+    "Host": "stats.nba.com",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "x-nba-stats-origin": "stats",
+    "x-nba-stats-token": "true",
+    "Referer": "https://www.nba.com/stats",
+    "Origin": "https://www.nba.com",
+    "Sec-Fetch-Site": "same-site",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Dest": "empty",
+    "Connection": "keep-alive",
+}
 
-load_dotenv()
+RETRYABLE_EXCEPTIONS = (
+    requests.exceptions.RequestException,
+    requests.exceptions.Timeout,
+    requests.exceptions.ConnectionError,
+    requests.exceptions.HTTPError,
+    JSONDecodeError,
+)
 
 
-def get_player_game_logs(season: str, season_type: str) -> list[dict[str, Any]]:
-    """Fetch one season of player-level box scores from NBA Stats."""
-    try:
-        from nba_api.stats.endpoints import leaguegamelog
-    except ImportError as error:  # pragma: no cover - guarded by requirements
-        raise RuntimeError(
-            "nba_api is not installed. Run `pip install -r requirements.txt`."
-        ) from error
+@retry(
+    reraise=True,
+    stop=stop_after_attempt(6),
+    wait=wait_random_exponential(multiplier=2, min=3, max=45),
+    retry=retry_if_exception_type(RETRYABLE_EXCEPTIONS),
+    before_sleep=before_sleep_log(LOGGER, logging.WARNING),
+)
+def fetch_player_game_logs_with_retry(season: str) -> list[dict[str, Any]]:
+    """Fetch player game logs from stats.nba.com with automated exponential retries."""
+    LOGGER.info("Requesting player game logs from stats.nba.com for season %s...", season)
 
-    endpoint = leaguegamelog.LeagueGameLog(
-        player_or_team_abbreviation="P",
-        season=season,
-        season_type_all_star=season_type,
-        timeout=30,
+    logs = playergamelogs.PlayerGameLogs(
+        season_nullable=season,
+        season_type_nullable="Regular Season",
+        headers=NBA_API_HEADERS,
+        timeout=90,  # Allow NBA servers up to 90s to compile full-season payloads
     )
-    result_sets = endpoint.get_dict().get("resultSets", [])
-    if not result_sets:
-        raise RuntimeError("NBA Stats returned no result sets.")
 
-    result_set = result_sets[0]
-    headers = result_set.get("headers", [])
-    rows = result_set.get("rowSet", [])
-    if not headers:
-        raise RuntimeError("NBA Stats response did not include column headers.")
+    data = logs.get_normalized_dict()
+    records: list[dict[str, Any]] = data.get("PlayerGameLogs", [])
 
-    records = [dict(zip(headers, row, strict=True)) for row in rows]
     if not records:
-        raise RuntimeError(
-            f"NBA Stats returned no player game logs for {season} ({season_type})."
-        )
+        LOGGER.warning("No records returned by stats.nba.com for season %s", season)
+        return []
+
+    LOGGER.info("Successfully extracted %d records for season %s", len(records), season)
     return records
 
 
 @dlt.resource(
     name="player_game_logs",
-    primary_key=("GAME_ID", "PLAYER_ID"),
     write_disposition="merge",
+    primary_key=("GAME_ID", "PLAYER_ID"),
 )
-def player_game_logs(season: str, season_type: str) -> Iterator[dict[str, Any]]:
-    """Yield raw API records for dlt to normalize and load."""
-    records = get_player_game_logs(season=season, season_type=season_type)
-    LOGGER.info("Fetched %s player game logs for %s %s", len(records), season, season_type)
+def player_game_logs_resource(season: str) -> Iterator[dict[str, Any]]:
+    """Yield extracted player game records into dlt."""
+    records = fetch_player_game_logs_with_retry(season=season)
     for record in records:
-        yield {
-            **record,
-            "source_season": season,
-            "source_season_type": season_type,
-        }
+        record["season_id"] = season
+        yield record
 
 
-def postgres_destination() -> Any:
-    """Build dlt's destination from local environment variables.
-
-    An explicitly supplied destination URL still wins, which keeps Docker and
-    hosted deployments compatible with dlt's standard configuration.
-    """
-    credentials = os.getenv("DESTINATION__POSTGRES__CREDENTIALS")
-    if not credentials:
-        username = quote(os.getenv("POSTGRES_USER", "admin"), safe="")
-        password = quote(os.getenv("POSTGRES_PASSWORD", "adminpassword"), safe="")
-        host = os.getenv("POSTGRES_HOST", "127.0.0.1")
-        port = os.getenv("POSTGRES_PORT", "5433")
-        database = os.getenv("POSTGRES_DB", "lakehouse")
-        credentials = f"postgresql://{username}:{password}@{host}:{port}/{database}"
-    return dlt.destinations.postgres(credentials=credentials)
-
-
-def load_player_game_logs(season: str, season_type: str) -> Any:
-    """Run the idempotent local ELT load and return dlt's load report."""
+def run_pipeline(season: str) -> None:
+    """Run dlt pipeline to load raw game logs into PostgreSQL."""
     pipeline = dlt.pipeline(
-        pipeline_name="nba_player_game_logs",
-        destination=postgres_destination(),
+        pipeline_name="nba_lakehouse_ingestion",
+        destination="postgres",
         dataset_name="raw_nba",
     )
-    return pipeline.run(player_game_logs(season=season, season_type=season_type))
+
+    LOGGER.info("Starting dlt ingestion pipeline for season %s...", season)
+    load_info = pipeline.run(
+        player_game_logs_resource(season=season),
+        table_name="player_game_logs",
+    )
+    LOGGER.info("dlt pipeline run completed: %s", load_info)
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Load NBA player game logs into the local PostgreSQL warehouse."
-    )
-    parser.add_argument("--season", default=DEFAULT_SEASON, help="NBA season, e.g. 2024-25")
+    parser = argparse.ArgumentParser(description="Ingest NBA player game logs into PostgreSQL.")
     parser.add_argument(
-        "--season-type",
-        choices=SEASON_TYPES,
-        default="Regular Season",
-        help="NBA competition segment to ingest.",
+        "--season",
+        type=str,
+        default="2024-25",
+        help="Target NBA season formatted as YYYY-YY (e.g. 2024-25)",
     )
     return parser.parse_args()
 
 
-def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
-    args = parse_args()
-    load_info = load_player_game_logs(season=args.season, season_type=args.season_type)
-    LOGGER.info("Load completed successfully.\n%s", load_info)
-
-
 if __name__ == "__main__":
-    main()
+    args = parse_args()
+    try:
+        run_pipeline(season=args.season)
+    except Exception as error:
+        LOGGER.critical("Ingestion pipeline failed fatally: %s", error, exc_info=True)
+        sys.exit(1)
