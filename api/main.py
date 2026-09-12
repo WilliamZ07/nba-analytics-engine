@@ -1,24 +1,36 @@
 """HTTP interface for curated NBA analytics data."""
 from __future__ import annotations
-from api.cache import cache_endpoint
 
 import logging
+import sys
 from typing import Annotated, Any
 import psycopg2
 from fastapi import FastAPI, HTTPException, Query, status
 from psycopg2.extras import RealDictCursor
 
+from api.cache import cache_endpoint, get_redis_client
 from api.database import get_db_connection
+from api.middleware import StructuredLoggingMiddleware
 
+# Configure structured telemetry output to stdout
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
+)
 LOGGER = logging.getLogger(__name__)
+
 DEFAULT_LIMIT = 25
 MAX_LIMIT = 100
 
 app = FastAPI(
     title="NBA Lakehouse API",
-    version="0.3.0",
+    version="0.3.3",
     description="Read-only endpoints backed by dbt-curated NBA analytics marts and Redis caching.",
 )
+
+# Register telemetry middleware
+app.add_middleware(StructuredLoggingMiddleware)
 
 
 def fetch_all(query: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
@@ -43,13 +55,31 @@ def fetch_all(query: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
 
 @app.get("/", tags=["platform"])
 def read_root() -> dict[str, str]:
-    return {"status": "healthy", "service": "nba-lakehouse-api", "version": "0.3.0"}
+    return {"status": "healthy", "service": "nba-lakehouse-api", "version": "0.3.3"}
 
 
 @app.get("/health", tags=["platform"])
 def health_check() -> dict[str, str]:
     fetch_all("SELECT 1 AS database_ok;")
-    return {"status": "healthy", "database": "connected"}
+    redis_client = get_redis_client()
+    redis_ok = bool(redis_client and redis_client.ping())
+    return {
+        "status": "healthy",
+        "database": "connected",
+        "cache": "connected" if redis_ok else "disabled",
+    }
+
+
+@app.delete("/cache", tags=["platform"])
+def flush_cache() -> dict[str, str]:
+    """Flush all cached query responses from Redis."""
+    redis_client = get_redis_client()
+    if redis_client:
+        keys = redis_client.keys("nba_api:*")
+        if keys:
+            redis_client.delete(*keys)
+        return {"status": "cleared", "keys_removed": str(len(keys))}
+    return {"status": "bypassed", "detail": "cache unavailable"}
 
 
 @app.get("/players", tags=["players"])
