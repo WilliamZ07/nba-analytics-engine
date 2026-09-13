@@ -38,6 +38,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-adminpassword}
       REDIS_HOST: redis
       REDIS_PORT: 6379
+      PYTHONPATH: /app
     ports:
       - "8000:8000"
     volumes:
@@ -48,6 +49,21 @@ services:
       redis:
         condition: service_healthy
     profiles: ["api"]
+
+  pipeline:
+    build: .
+    command: ["python", "scripts/run_pipeline.py", "--season", "2024-25"]
+    environment:
+      <<: *database_environment
+      DESTINATION__POSTGRES__CREDENTIALS: postgresql://${POSTGRES_USER:-admin}:${POSTGRES_PASSWORD:-adminpassword}@postgres:5432/${POSTGRES_DB:-lakehouse}
+    volumes:
+      - .:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    profiles: ["jobs"]
 
   ingest:
     build: .
