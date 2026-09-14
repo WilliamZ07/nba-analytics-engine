@@ -3,10 +3,11 @@ nba_lakehouse:
   outputs:
     dev:
       type: postgres
-      host: "{{ env_var('POSTGRES_HOST', '127.0.0.1') }}"
-      port: "{{ env_var('POSTGRES_PORT', '5433') | int }}"
+      host: "{{ env_var('POSTGRES_HOST', 'localhost') }}"
       user: "{{ env_var('POSTGRES_USER', 'admin') }}"
       password: "{{ env_var('POSTGRES_PASSWORD', 'adminpassword') }}"
+      port: "{{ env_var('POSTGRES_PORT', '5432') | int }}"
       dbname: "{{ env_var('POSTGRES_DB', 'lakehouse') }}"
       schema: analytics
       threads: 4
+      keepalives_idle: 0
