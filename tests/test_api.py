@@ -60,6 +60,27 @@ def test_surging_players_endpoint():
         assert "scoring_surge_differential" in surging[0]
 
 
+def test_team_advanced_ratings():
+    response = client.get("/teams/1610612747/ratings?season=2024-25")
+    assert response.status_code == 200
+    data = response.json()
+    assert isinstance(data, list)
+    if len(data) > 0:
+        team = data[0]
+        assert "adjusted_defensive_rating" in team
+        assert "adjusted_net_rating" in team
+        assert "pace" in team
+
+
+def test_list_team_ratings_sorting():
+    response = client.get("/analytics/team-ratings?season=2024-25&sort_by=adjusted_net_rating")
+    assert response.status_code == 200
+    teams = response.json()
+    assert isinstance(teams, list)
+    if len(teams) > 1:
+        assert float(teams[0]["adjusted_net_rating"]) >= float(teams[1]["adjusted_net_rating"])
+
+
 def test_invalid_season_param_validation():
     response = client.get("/players?season=invalid-season")
     assert response.status_code == 422

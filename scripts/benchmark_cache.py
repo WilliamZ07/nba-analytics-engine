@@ -11,6 +11,8 @@ ENDPOINTS_TO_BENCHMARK = [
     {"name": "Team Standings", "path": "/teams?season=2024-25"},
     {"name": "Player Search", "path": "/players?search=LeBron&season=2024-25"},
     {"name": "Surging Players", "path": "/analytics/surging-players?limit=10&season=2024-25"},
+    {"name": "Team Ratings", "path": "/analytics/team-ratings?season=2024-25&sort_by=adjusted_net_rating"},
+    {"name": "Team Specific Ratings", "path": "/teams/1610612747/ratings?season=2024-25"},
 ]
 
 
@@ -32,12 +34,11 @@ def run_benchmark(base_url: str, iterations: int) -> None:
     """Execute cold vs. warm cache benchmarks across core API routes."""
     client = httpx.Client(base_url=base_url, timeout=30.0)
 
-    print("\n" + "=" * 80)
+    print("\n" + "=" * 85)
     print(f"  NBA Lakehouse API Latency Benchmark ({iterations} warm iterations per route)")
     print(f"  Target: {base_url}")
-    print("=" * 80)
+    print("=" * 85)
 
-    # 1. Flush Redis cache to ensure genuine cold database reads
     try:
         flush_resp = client.delete("/cache")
         if flush_resp.status_code == 200:
@@ -51,7 +52,7 @@ def run_benchmark(base_url: str, iterations: int) -> None:
         name = route["name"]
         path = route["path"]
 
-        # Measure Cold Execution (PostgreSQL Query + Cache Populate)
+        # 1. Measure Cold Query (PostgreSQL Execution + Redis Store)
         start_cold = time.perf_counter()
         cold_resp = client.get(path)
         cold_latency = round((time.perf_counter() - start_cold) * 1000, 2)
@@ -60,7 +61,7 @@ def run_benchmark(base_url: str, iterations: int) -> None:
             print(f"[ERROR] Route {path} returned status {cold_resp.status_code}")
             continue
 
-        # Measure Warm Executions (Redis In-Memory Retrieval)
+        # 2. Measure Warm Queries (Redis Cache Hits)
         warm_latencies: list[float] = []
         for _ in range(iterations):
             start_warm = time.perf_counter()
@@ -81,20 +82,19 @@ def run_benchmark(base_url: str, iterations: int) -> None:
             "speedup": f"{speedup}x",
         })
 
-    # Print Formatted Results Table
-    header = f"{'Endpoint':<22} | {'Cold (DB)':<10} | {'Warm P50':<9} | {'Warm P95':<9} | {'Warm P99':<9} | {'Speedup':<8}"
+    header = f"{'Endpoint':<25} | {'Cold (DB)':<10} | {'Warm P50':<9} | {'Warm P95':<9} | {'Warm P99':<9} | {'Speedup':<8}"
     print(header)
     print("-" * len(header))
     for res in results:
         print(
-            f"{res['name']:<22} | "
+            f"{res['name']:<25} | "
             f"{res['cold_ms']:>7.2f} ms | "
             f"{res['p50_ms']:>6.2f} ms | "
             f"{res['p95_ms']:>6.2f} ms | "
             f"{res['p99_ms']:>6.2f} ms | "
             f"{res['speedup']:>8}"
         )
-    print("=" * 80 + "\n")
+    print("=" * 85 + "\n")
 
 
 def parse_args() -> argparse.Namespace:

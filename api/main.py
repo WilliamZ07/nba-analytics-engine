@@ -12,7 +12,6 @@ from api.cache import cache_endpoint, get_redis_client
 from api.database import get_db_connection
 from api.middleware import StructuredLoggingMiddleware
 
-# Configure structured telemetry output to stdout
 logging.basicConfig(
     level=logging.INFO,
     format="%(message)s",
@@ -25,11 +24,10 @@ MAX_LIMIT = 100
 
 app = FastAPI(
     title="NBA Lakehouse API",
-    version="0.3.3",
+    version="0.4.0",
     description="Read-only endpoints backed by dbt-curated NBA analytics marts and Redis caching.",
 )
 
-# Register telemetry middleware
 app.add_middleware(StructuredLoggingMiddleware)
 
 
@@ -55,7 +53,7 @@ def fetch_all(query: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
 
 @app.get("/", tags=["platform"])
 def read_root() -> dict[str, str]:
-    return {"status": "healthy", "service": "nba-lakehouse-api", "version": "0.3.3"}
+    return {"status": "healthy", "service": "nba-lakehouse-api", "version": "0.4.0"}
 
 
 @app.get("/health", tags=["platform"])
@@ -89,7 +87,6 @@ def list_players(
     search: str | None = Query(default=None, min_length=2, max_length=80),
     limit: Annotated[int, Query(ge=1, le=MAX_LIMIT)] = DEFAULT_LIMIT,
 ) -> list[dict[str, Any]]:
-    """Return player aggregates, optionally filtered by season or name."""
     search_term = f"%{search.strip()}%" if search else None
     return fetch_all(
         """
@@ -118,7 +115,6 @@ def player_season_summary(
     player_id: int,
     season: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}$"),
 ) -> list[dict[str, Any]]:
-    """Return detailed season-by-season performance summary and true-shooting metrics."""
     return fetch_all(
         """
         SELECT
@@ -153,7 +149,6 @@ def player_game_log(
     season: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}$"),
     limit: Annotated[int, Query(ge=1, le=MAX_LIMIT)] = DEFAULT_LIMIT,
 ) -> list[dict[str, Any]]:
-    """Return a player's individual games with rolling 10-game window metrics."""
     return fetch_all(
         """
         SELECT
@@ -185,7 +180,6 @@ def player_game_log(
 def list_teams(
     season: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}$"),
 ) -> list[dict[str, Any]]:
-    """Return team win-loss standings and scoring metrics."""
     return fetch_all(
         """
         SELECT
@@ -212,7 +206,6 @@ def team_stat_leaders(
     season: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}$"),
     limit: Annotated[int, Query(ge=1, le=20)] = 5,
 ) -> list[dict[str, Any]]:
-    """Return leading scorers for a specified team."""
     return fetch_all(
         """
         SELECT
@@ -234,13 +227,78 @@ def team_stat_leaders(
     )
 
 
+@app.get("/teams/{team_id}/ratings", tags=["teams"])
+@cache_endpoint(ttl_seconds=3600)
+def team_advanced_ratings(
+    team_id: int,
+    season: str = Query(default="2024-25", pattern=r"^\d{4}-\d{2}$"),
+) -> list[dict[str, Any]]:
+    """Return pace, unadjusted ratings, and opponent-adjusted efficiency metrics for a team."""
+    return fetch_all(
+        """
+        SELECT
+            team_id,
+            team_abbreviation,
+            season_id,
+            games_played,
+            wins,
+            losses,
+            win_percentage,
+            pace,
+            offensive_rating,
+            defensive_rating,
+            net_rating,
+            strength_of_schedule,
+            adjusted_offensive_rating,
+            adjusted_defensive_rating,
+            adjusted_net_rating
+        FROM analytics.dim_team_advanced_ratings
+        WHERE team_id = %s AND season_id = %s;
+        """,
+        (team_id, season),
+    )
+
+
+@app.get("/analytics/team-ratings", tags=["analytics"])
+@cache_endpoint(ttl_seconds=3600)
+def list_team_ratings(
+    season: str = Query(default="2024-25", pattern=r"^\d{4}-\d{2}$"),
+    sort_by: str = Query(
+        default="adjusted_net_rating",
+        pattern=r"^(adjusted_net_rating|adjusted_defensive_rating|adjusted_offensive_rating|pace)$",
+    ),
+) -> list[dict[str, Any]]:
+    """Return all teams sorted by advanced adjusted ratings."""
+    order_clause = "ASC" if sort_by == "adjusted_defensive_rating" else "DESC"
+    query = f"""
+        SELECT
+            team_id,
+            team_abbreviation,
+            season_id,
+            wins,
+            losses,
+            win_percentage,
+            pace,
+            offensive_rating,
+            defensive_rating,
+            net_rating,
+            strength_of_schedule,
+            adjusted_offensive_rating,
+            adjusted_defensive_rating,
+            adjusted_net_rating
+        FROM analytics.dim_team_advanced_ratings
+        WHERE season_id = %s
+        ORDER BY {sort_by} {order_clause};
+    """
+    return fetch_all(query, (season,))
+
+
 @app.get("/analytics/surging-players", tags=["analytics"])
 @cache_endpoint(ttl_seconds=600)
 def surging_players(
     season: str = Query(default="2024-25", pattern=r"^\d{4}-\d{2}$"),
     limit: Annotated[int, Query(ge=1, le=MAX_LIMIT)] = 10,
 ) -> list[dict[str, Any]]:
-    """Return players with the highest positive scoring differential over their last 10 games."""
     return fetch_all(
         """
         WITH latest_game_per_player AS (

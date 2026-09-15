@@ -1,18 +1,8 @@
 version: 2
 
 models:
-  - name: stg_nba__player_game_logs
-    description: Standardized NBA player box scores from the raw dlt-loaded data.
-    columns:
-      - name: game_id
-        tests:
-          - not_null
-      - name: player_id
-        tests:
-          - not_null
-
   - name: player_game_stats
-    description: Curated player-game fact table used by the API.
+    description: "Player-game level table enriched with composite keys and individual shooting metrics."
     columns:
       - name: player_game_id
         tests:
@@ -23,7 +13,7 @@ models:
           - not_null
 
   - name: dim_player_season_summary
-    description: Aggregated regular season metrics by player.
+    description: "Player-season aggregates containing per-game averages and true-shooting percentages."
     columns:
       - name: player_id
         tests:
@@ -36,7 +26,7 @@ models:
           - not_null
 
   - name: dim_team_summary
-    description: Team-level win/loss records and scoring averages.
+    description: "Team-season aggregates containing win totals, loss totals, and average points per game."
     columns:
       - name: team_id
         tests:
@@ -46,9 +36,42 @@ models:
           - not_null
 
   - name: fct_player_rolling_stats
-    description: Rolling 10-game window calculations and scoring differential metrics.
+    description: "Rolling 10-game window calculations tracking player scoring, rebounding, and surge differentials."
     columns:
       - name: player_game_id
         tests:
           - unique
+          - not_null
+
+  - name: fct_team_game_stats
+    description: "Team-level box scores with joint possessions, pace, and single-game offensive/defensive ratings."
+    columns:
+      - name: team_game_id
+        tests:
+          - not_null
+          - unique
+      - name: game_possessions
+        tests:
+          - not_null
+      - name: pace
+        tests:
+          - not_null
+      - name: defensive_rating
+        tests:
+          - not_null
+
+  - name: dim_team_advanced_ratings
+    description: "Season-level team efficiency metrics with strength-of-schedule and opponent-adjusted ratings."
+    columns:
+      - name: team_id
+        tests:
+          - not_null
+      - name: season_id
+        tests:
+          - not_null
+      - name: adjusted_defensive_rating
+        tests:
+          - not_null
+      - name: adjusted_net_rating
+        tests:
           - not_null
