@@ -9,3 +9,5 @@ pytest
 httpx
 redis
 tenacity
+streamlit>=1.35.0
+plotly>=5.22.0

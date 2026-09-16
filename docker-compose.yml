@@ -89,5 +89,22 @@ services:
         condition: service_healthy
     profiles: ["jobs"]
 
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nba_lakehouse_dashboard
+    command: streamlit run dashboard/app.py --server.port=8501 --server.address=0.0.0.0
+    environment:
+      API_BASE_URL: http://api:8000
+    ports:
+      - "8501:8501"
+    profiles:
+      - dashboard
+      - full
+    depends_on:
+      api:
+        condition: service_started
+
 volumes:
   postgres_data:
