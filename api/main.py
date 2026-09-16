@@ -19,8 +19,8 @@ logging.basicConfig(
 )
 LOGGER = logging.getLogger(__name__)
 
-DEFAULT_LIMIT = 25
-MAX_LIMIT = 100
+DEFAULT_LIMIT = 50
+MAX_LIMIT = 1000
 
 app = FastAPI(
     title="NBA Lakehouse API",
@@ -44,7 +44,7 @@ def fetch_all(query: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
         LOGGER.exception("Database query failed")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Analytics database is unavailable. Load and transform data before querying.",
+            detail=f"Database query failed: {error}",
         ) from error
     finally:
         if connection is not None:
@@ -85,7 +85,7 @@ def flush_cache() -> dict[str, str]:
 def list_players(
     season: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}$"),
     search: str | None = Query(default=None, min_length=2, max_length=80),
-    limit: Annotated[int, Query(ge=1, le=MAX_LIMIT)] = DEFAULT_LIMIT,
+    limit: Annotated[int, Query(ge=1, le=MAX_LIMIT)] = 1000,
 ) -> list[dict[str, Any]]:
     search_term = f"%{search.strip()}%" if search else None
     return fetch_all(
@@ -102,7 +102,7 @@ def list_players(
         FROM analytics.dim_player_season_summary
         WHERE (%s IS NULL OR season_id = %s)
           AND (%s IS NULL OR player_name ILIKE %s)
-        ORDER BY points_per_game DESC NULLS LAST, player_name
+        ORDER BY player_name ASC
         LIMIT %s;
         """,
         (season, season, search_term, search_term, limit),
@@ -147,31 +147,149 @@ def player_season_summary(
 def player_game_log(
     player_id: int,
     season: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}$"),
-    limit: Annotated[int, Query(ge=1, le=MAX_LIMIT)] = DEFAULT_LIMIT,
+    limit: Annotated[int, Query(ge=1, le=MAX_LIMIT)] = 82,
 ) -> list[dict[str, Any]]:
+    """Return enriched player game logs with free throws, steals, blocks, and shooting splits."""
     return fetch_all(
         """
         SELECT
-            game_id,
-            game_date,
-            season_id,
-            player_id,
-            player_name,
-            team_abbreviation,
-            points,
-            assists,
-            rebounds,
-            rolling_10_pts_avg,
-            rolling_10_ast_avg,
-            rolling_10_reb_avg,
-            scoring_surge_differential
-        FROM analytics.fct_player_rolling_stats
-        WHERE player_id = %s
-          AND (%s IS NULL OR season_id = %s)
-        ORDER BY game_date DESC, game_id DESC
+            r.game_id,
+            r.game_date,
+            r.season_id,
+            r.player_id,
+            r.player_name,
+            r.team_abbreviation,
+            p.matchup,
+            p.wl,
+            p.minutes_played,
+            r.points,
+            p.field_goals_made AS fgm,
+            p.field_goals_attempted AS fga,
+            p.three_pointers_made AS fg3_m,
+            p.three_pointers_attempted AS fg3_a,
+            p.free_throws_made AS ftm,
+            p.free_throws_attempted AS fta,
+            r.rebounds,
+            r.assists,
+            p.steals,
+            p.blocks,
+            p.turnovers,
+            ROUND(
+                p.points::NUMERIC / NULLIF(2.0 * (p.field_goals_attempted + 0.44 * p.free_throws_attempted), 0) * 100,
+                1
+            ) AS true_shooting_pct,
+            r.rolling_10_pts_avg,
+            r.scoring_surge_differential
+        FROM analytics.fct_player_rolling_stats r
+        INNER JOIN analytics.player_game_stats p
+            ON r.player_game_id = p.player_game_id
+        WHERE r.player_id = %s
+          AND (%s IS NULL OR r.season_id = %s)
+        ORDER BY r.game_date DESC, r.game_id DESC
         LIMIT %s;
         """,
         (player_id, season, season, limit),
+    )
+
+
+@app.get("/players/{player_id}/splits", tags=["players"])
+@cache_endpoint(ttl_seconds=1800)
+def player_splits(
+    player_id: int,
+    season: str = Query(default="2024-25", pattern=r"^\d{4}-\d{2}$"),
+) -> list[dict[str, Any]]:
+    """Return contextual splits including Steals and Blocks by Location, Outcome, and Opponent Defensive Tier."""
+    return fetch_all(
+        """
+        WITH ranked_defenses AS (
+            SELECT
+                team_id,
+                season_id,
+                RANK() OVER (PARTITION BY season_id ORDER BY adjusted_defensive_rating ASC) AS def_rank
+            FROM analytics.dim_team_advanced_ratings
+            WHERE season_id = %s
+        ),
+        player_games_context AS (
+            SELECT
+                p.game_id,
+                p.season_id,
+                p.matchup,
+                p.wl,
+                p.points,
+                p.rebounds,
+                p.assists,
+                p.steals,
+                p.blocks,
+                p.field_goals_made,
+                p.field_goals_attempted,
+                p.free_throws_attempted,
+                CASE WHEN p.matchup LIKE '%%@%%' THEN 'Away' ELSE 'Home' END AS location_split,
+                CASE WHEN p.wl = 'W' THEN 'Wins' ELSE 'Losses' END AS outcome_split,
+                CASE
+                    WHEN rd.def_rank <= 10 THEN 'vs Top 10 Defenses'
+                    WHEN rd.def_rank >= 21 THEN 'vs Bottom 10 Defenses'
+                    ELSE 'vs Middle Tier Defenses'
+                END AS opponent_tier_split
+            FROM analytics.player_game_stats p
+            INNER JOIN analytics.fct_team_game_stats ft
+                ON p.game_id = ft.game_id AND p.team_id = ft.team_id
+            INNER JOIN ranked_defenses rd
+                ON ft.opponent_team_id = rd.team_id AND ft.season_id = rd.season_id
+            WHERE p.player_id = %s AND p.season_id = %s
+        ),
+        location_agg AS (
+            SELECT
+                'Location' AS split_category,
+                location_split AS split_name,
+                COUNT(*) AS games,
+                ROUND(AVG(points), 1) AS ppg,
+                ROUND(AVG(rebounds), 1) AS rpg,
+                ROUND(AVG(assists), 1) AS apg,
+                ROUND(AVG(steals), 1) AS spg,
+                ROUND(AVG(blocks), 1) AS bpg,
+                ROUND(SUM(points)::NUMERIC / NULLIF(2.0 * (SUM(field_goals_attempted) + 0.44 * SUM(free_throws_attempted)), 0) * 100, 1) AS true_shooting_pct,
+                ROUND(SUM(CASE WHEN wl = 'W' THEN 1 ELSE 0 END)::NUMERIC / NULLIF(COUNT(*), 0) * 100, 1) AS win_pct
+            FROM player_games_context
+            GROUP BY location_split
+        ),
+        outcome_agg AS (
+            SELECT
+                'Outcome' AS split_category,
+                outcome_split AS split_name,
+                COUNT(*) AS games,
+                ROUND(AVG(points), 1) AS ppg,
+                ROUND(AVG(rebounds), 1) AS rpg,
+                ROUND(AVG(assists), 1) AS apg,
+                ROUND(AVG(steals), 1) AS spg,
+                ROUND(AVG(blocks), 1) AS bpg,
+                ROUND(SUM(points)::NUMERIC / NULLIF(2.0 * (SUM(field_goals_attempted) + 0.44 * SUM(free_throws_attempted)), 0) * 100, 1) AS true_shooting_pct,
+                ROUND(SUM(CASE WHEN wl = 'W' THEN 1 ELSE 0 END)::NUMERIC / NULLIF(COUNT(*), 0) * 100, 1) AS win_pct
+            FROM player_games_context
+            GROUP BY outcome_split
+        ),
+        tier_agg AS (
+            SELECT
+                'Opponent Defense Quality' AS split_category,
+                opponent_tier_split AS split_name,
+                COUNT(*) AS games,
+                ROUND(AVG(points), 1) AS ppg,
+                ROUND(AVG(rebounds), 1) AS rpg,
+                ROUND(AVG(assists), 1) AS apg,
+                ROUND(AVG(steals), 1) AS spg,
+                ROUND(AVG(blocks), 1) AS bpg,
+                ROUND(SUM(points)::NUMERIC / NULLIF(2.0 * (SUM(field_goals_attempted) + 0.44 * SUM(free_throws_attempted)), 0) * 100, 1) AS true_shooting_pct,
+                ROUND(SUM(CASE WHEN wl = 'W' THEN 1 ELSE 0 END)::NUMERIC / NULLIF(COUNT(*), 0) * 100, 1) AS win_pct
+            FROM player_games_context
+            GROUP BY opponent_tier_split
+        )
+        SELECT * FROM location_agg
+        UNION ALL
+        SELECT * FROM outcome_agg
+        UNION ALL
+        SELECT * FROM tier_agg
+        ORDER BY split_category, split_name;
+        """,
+        (season, player_id, season),
     )
 
 
@@ -233,7 +351,6 @@ def team_advanced_ratings(
     team_id: int,
     season: str = Query(default="2024-25", pattern=r"^\d{4}-\d{2}$"),
 ) -> list[dict[str, Any]]:
-    """Return pace, unadjusted ratings, and opponent-adjusted efficiency metrics for a team."""
     return fetch_all(
         """
         SELECT
@@ -268,7 +385,6 @@ def list_team_ratings(
         pattern=r"^(adjusted_net_rating|adjusted_defensive_rating|adjusted_offensive_rating|pace)$",
     ),
 ) -> list[dict[str, Any]]:
-    """Return all teams sorted by advanced adjusted ratings."""
     order_clause = "ASC" if sort_by == "adjusted_defensive_rating" else "DESC"
     query = f"""
         SELECT

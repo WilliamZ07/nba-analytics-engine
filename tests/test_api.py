@@ -84,3 +84,16 @@ def test_list_team_ratings_sorting():
 def test_invalid_season_param_validation():
     response = client.get("/players?season=invalid-season")
     assert response.status_code == 422
+
+def test_player_splits_endpoint():
+    # Test with LeBron James (player_id = 2544)
+    response = client.get("/players/2544/splits?season=2024-25")
+    assert response.status_code == 200
+    data = response.json()
+    assert isinstance(data, list)
+    if len(data) > 0:
+        split = data[0]
+        assert "split_category" in split
+        assert "split_name" in split
+        assert "ppg" in split
+        assert "true_shooting_pct" in split
