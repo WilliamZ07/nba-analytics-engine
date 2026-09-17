@@ -97,3 +97,32 @@ def test_player_splits_endpoint():
         assert "split_name" in split
         assert "ppg" in split
         assert "true_shooting_pct" in split
+
+def test_list_games_endpoint():
+    response = client.get("/games?season=2024-25&limit=5")
+    assert response.status_code == 200
+    games = response.json()
+    assert isinstance(games, list)
+    if len(games) > 0:
+        game = games[0]
+        assert "game_id" in game
+        assert "home_team" in game
+        assert "away_team" in game
+        assert "home_score" in game
+        assert "away_score" in game
+
+
+def test_game_boxscore_endpoint():
+    # 1. Fetch any recent game_id
+    games_resp = client.get("/games?season=2024-25&limit=1")
+    assert games_resp.status_code == 200
+    games = games_resp.json()
+    if len(games) > 0:
+        test_game_id = games[0]["game_id"]
+        box_resp = client.get(f"/games/{test_game_id}/boxscore")
+        assert box_resp.status_code == 200
+        data = box_resp.json()
+        assert "teams" in data
+        assert "players" in data
+        assert len(data["teams"]) == 2
+        assert len(data["players"]) > 0

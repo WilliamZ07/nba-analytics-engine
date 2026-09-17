@@ -35,10 +35,18 @@ st.markdown(
 
 
 def get_team_logo_url(team_abbrev: str) -> str:
-    """Return high-resolution transparent PNG logo URL from CDN."""
-    # Special mapping for teams if needed, otherwise ESPN's 500x500 CDN handles standard trico codes
-    abbr = team_abbrev.lower()
-    return f"https://a.espncdn.com/i/teamlogos/nba/500/{abbr}.png"
+    """Return high-resolution transparent PNG logo URL from ESPN CDN with NBA trico overrides."""
+    espn_overrides = {
+        "UTA": "utah",
+        "GSW": "gs",
+        "NOP": "no",
+        "NYK": "ny",
+        "SAS": "sa",
+        "WAS": "wsh",
+    }
+    abbr_clean = team_abbrev.strip().upper() if team_abbrev else "NBA"
+    slug = espn_overrides.get(abbr_clean, abbr_clean.lower())
+    return f"https://a.espncdn.com/i/teamlogos/nba/500/{slug}.png"
 
 
 def get_player_headshot_url(player_id: int | str) -> str:
@@ -47,7 +55,7 @@ def get_player_headshot_url(player_id: int | str) -> str:
 
 
 @st.cache_data(ttl=300)
-def fetch_api_data(endpoint: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+def fetch_api_data(endpoint: str, params: dict[str, Any] | None = None) -> Any:
     """Fetch structured JSON payload from FastAPI backend."""
     try:
         url = f"{API_BASE_URL.rstrip('/')}/{endpoint.lstrip('/')}"
@@ -105,11 +113,12 @@ if not df_ratings.empty:
         if col in df_ratings.columns:
             df_ratings[col] = pd.to_numeric(df_ratings[col], errors="coerce")
 
-tab_overview, tab_matchup, tab_players, tab_surges = st.tabs(
+tab_overview, tab_matchup, tab_players, tab_boxscore, tab_surges = st.tabs(
     [
         "📊 Team Efficiency Matrix",
         "⚔️ Matchup Tale of the Tape",
         "👤 Player Intelligence & Logs",
+        "📋 Single-Game Box Score",
         "🔥 Surge Tracker",
     ]
 )
@@ -184,7 +193,7 @@ with tab_overview:
                 )
 
 # ---------------------------------------------------------
-# TAB 2: HEAD-TO-HEAD TALE OF THE TAPE (WITH TEAM LOGOS)
+# TAB 2: HEAD-TO-HEAD TALE OF THE TAPE
 # ---------------------------------------------------------
 with tab_matchup:
     if not df_ratings.empty:
@@ -202,8 +211,6 @@ with tab_matchup:
         t_b = df_ratings[df_ratings["team_abbreviation"] == team_b].iloc[0]
 
         card_a, card_b = st.columns(2)
-
-        # Team A Card with Logo
         with card_a:
             with st.container(border=True):
                 logo_col, text_col = st.columns([1, 3])
@@ -214,7 +221,6 @@ with tab_matchup:
                     st.markdown(f"**Record:** {int(t_a['wins'])}-{int(t_a['losses'])} &nbsp;|&nbsp; **Win %:** {t_a['win_percentage'] * 100:.1f}%")
                     st.markdown(f"**Adj Net Rating:** `{t_a['adjusted_net_rating']:+.2f}`")
 
-        # Team B Card with Logo
         with card_b:
             with st.container(border=True):
                 logo_col, text_col = st.columns([1, 3])
@@ -271,7 +277,7 @@ with tab_matchup:
             st.plotly_chart(fig_bar, use_container_width=True)
 
 # ---------------------------------------------------------
-# TAB 3: PLAYER INTELLIGENCE & LOGS (WITH HEADSHOTS & LOGOS)
+# TAB 3: PLAYER INTELLIGENCE & LOGS
 # ---------------------------------------------------------
 with tab_players:
     st.markdown("### 👤 Player Intelligence & Contextual Logs")
@@ -313,7 +319,6 @@ with tab_players:
                 if c in df_p_games.columns:
                     df_p_games[c] = pd.to_numeric(df_p_games[c], errors="coerce").fillna(0.0)
 
-            # Dossier Header with Headshot and Team Logo
             with st.container(border=True):
                 col_headshot, col_bio = st.columns([1, 5])
                 with col_headshot:
@@ -327,7 +332,6 @@ with tab_players:
                         st.markdown(f"## **{selected_player['player_name']}**")
                         st.caption(f"**Team:** {team_abbr} &nbsp;|&nbsp; **Season:** {selected_season} &nbsp;|&nbsp; **Player ID:** `{selected_player_id}`")
 
-                    # 7-Column Metric Banner
                     pk1, pk2, pk3, pk4, pk5, pk6, pk7 = st.columns(7)
                     pk1.metric("Season PPG", f"{float(p_summary.get('ppg') or 0.0):.1f}", f"{int(p_summary.get('games_played') or 0)} GP")
                     pk2.metric("Rebounds", f"{float(p_summary.get('rpg') or 0.0):.1f} RPG")
@@ -341,10 +345,9 @@ with tab_players:
 
             st.markdown("<br>", unsafe_allow_html=True)
 
-            # Interactive Timeline Chart
             with st.container(border=True):
                 st.markdown("#### 📈 Game Scoring Performance vs. 10-Game Baseline")
-                st.caption("Hover over any game for full box stats (PTS, REB, AST, STL, BLK, FT, TS%). Green = Boom (+5 pts), Red = Bust (-5 pts).")
+                st.caption("Hover over any game for full box stats. Green = Boom (+5 pts), Red = Bust (-5 pts).")
 
                 df_p_games_sorted = df_p_games.sort_values(by="game_date", ascending=True).reset_index(drop=True)
                 season_ppg = float(p_summary.get("ppg") or 0.0)
@@ -401,7 +404,6 @@ with tab_players:
                 fig_timeline.update_layout(template="plotly_dark", height=420, margin=dict(l=20, r=20, t=30, b=20), xaxis_title="Game Date", yaxis_title="Points Scored")
                 st.plotly_chart(fig_timeline, use_container_width=True)
 
-            # Contextual Splits & Detailed Game Logs
             col_splits, col_gamelog = st.columns([1, 1])
 
             with col_splits:
@@ -433,7 +435,7 @@ with tab_players:
             with col_gamelog:
                 with st.container(border=True):
                     st.markdown("#### 📋 Complete Box Game Logs")
-                    st.caption("Sort by any column header (e.g. click FTM, STL, or BLK to sort highest to lowest).")
+                    st.caption("Sort by clicking any column header.")
 
                     log_cols = [
                         "game_date", "matchup", "wl", "minutes_played",
@@ -472,7 +474,174 @@ with tab_players:
         st.warning("No player records found. Make sure the API service is active.")
 
 # ---------------------------------------------------------
-# TAB 4: SURGE TRACKER
+# TAB 4: SINGLE-GAME BOX SCORE VIEWER
+# ---------------------------------------------------------
+with tab_boxscore:
+    st.markdown("### 📋 Single-Game Box Score & Telemetry")
+    st.caption("Full game analytics: composite possessions, pace, efficiency ratings, and player lines.")
+
+    col_f_team, col_f_game = st.columns([1, 3])
+
+    with col_f_team:
+        team_options = ["ALL"] + sorted(df_ratings["team_abbreviation"].tolist()) if not df_ratings.empty else ["ALL"]
+        filter_team = st.selectbox("Filter Games by Team", options=team_options, index=0)
+
+    # Clean parameter construction: omit 'team' when filter is ALL
+    game_query_params: dict[str, Any] = {"season": selected_season, "limit": 60}
+    if filter_team != "ALL":
+        game_query_params["team"] = filter_team
+
+    games_list = fetch_api_data("/games", params=game_query_params)
+
+    if not games_list:
+        st.info("No games found for the selected season and filter.")
+    else:
+        game_options = {
+            f"{g['game_date']} | {g['away_team']} ({int(g['away_score'])}) @ {g['home_team']} ({int(g['home_score'])})": g["game_id"]
+            for g in games_list
+        }
+
+        with col_f_game:
+            # Setting index=None leaves the dropdown unselected by default
+            selected_game_label = st.selectbox(
+                "Select Matchup",
+                options=list(game_options.keys()),
+                index=None,
+                placeholder="Choose a game to inspect box score and player telemetry...",
+            )
+
+        # Default Empty State
+        if not selected_game_label:
+            with st.container(border=True):
+                st.markdown(
+                    """
+                    <div style="text-align: center; padding: 40px 20px;">
+                        <h3 style="color: #888;">🏀 No Game Selected</h3>
+                        <p style="color: #666;">Choose a team filter and select a matchup from the dropdown above to load the box score, pace, and player performance.</p>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+        else:
+            selected_game_id = game_options[selected_game_label]
+            box_data = fetch_api_data(f"/games/{selected_game_id}/boxscore")
+
+            if box_data and "teams" in box_data and "players" in box_data:
+                teams_meta = box_data["teams"]
+                players_all = box_data["players"]
+
+                away_t = next((t for t in teams_meta if t["location"] == "AWAY"), teams_meta[0])
+                home_t = next((t for t in teams_meta if t["location"] == "HOME"), teams_meta[1] if len(teams_meta) > 1 else teams_meta[0])
+
+                # 1. Mini Scoreboard Banner
+                with st.container(border=True):
+                    col_away_s, col_mid_s, col_home_s = st.columns([3, 2, 3])
+
+                    with col_away_s:
+                        c_logo, c_text = st.columns([1, 2])
+                        with c_logo:
+                            st.image(get_team_logo_url(away_t["team_abbreviation"]), width=85)
+                        with c_text:
+                            st.markdown(f"### **{away_t['team_abbreviation']}**")
+                            wl_badge = "🏆 WINNER" if away_t["wl"] == "W" else "FINAL"
+                            st.caption(f"{wl_badge} &nbsp;|&nbsp; Off Rtg: `{float(away_t.get('offensive_rating') or 0.0):.1f}`")
+                            st.markdown(f"## **{int(away_t['points'])}**")
+
+                    with col_mid_s:
+                        st.markdown("<h4 style='text-align: center; color: #888; margin-top: 10px;'>FINAL</h4>", unsafe_allow_html=True)
+                        st.markdown(f"<p style='text-align: center; margin: 0;'><b>{away_t['game_date']}</b></p>", unsafe_allow_html=True)
+                        pace_val = float(home_t.get('pace') or away_t.get('pace') or 0.0)
+                        poss_val = float(home_t.get('game_possessions') or away_t.get('game_possessions') or 0.0)
+                        st.markdown(
+                            f"<p style='text-align: center;'><span style='background: #2e3546; padding: 4px 10px; border-radius: 4px; font-size: 0.85rem;'>"
+                            f"Pace: <b>{pace_val:.1f}</b> &nbsp;|&nbsp; Possessions: <b>{poss_val:.1f}</b></span></p>",
+                            unsafe_allow_html=True,
+                        )
+
+                    with col_home_s:
+                        c_text, c_logo = st.columns([2, 1])
+                        with c_text:
+                            st.markdown(f"<h3 style='text-align: right;'><b>{home_t['team_abbreviation']}</b></h3>", unsafe_allow_html=True)
+                            wl_badge = "🏆 WINNER" if home_t["wl"] == "W" else "FINAL"
+                            st.markdown(f"<p style='text-align: right; color: #888;'>Off Rtg: <code>{float(home_t.get('offensive_rating') or 0.0):.1f}</code> &nbsp;|&nbsp; {wl_badge}</p>", unsafe_allow_html=True)
+                            st.markdown(f"<h2 style='text-align: right;'><b>{int(home_t['points'])}</b></h2>", unsafe_allow_html=True)
+                        with c_logo:
+                            st.image(get_team_logo_url(home_t["team_abbreviation"]), width=85)
+
+                # 2. Team Comparative Shooting & Turnover Table
+                with st.container(border=True):
+                    st.markdown("#### Team Shooting & Turnover Totals")
+                    team_comparison_rows = [
+                        {
+                            "Category": "Field Goals (FGM / FGA)",
+                            away_t["team_abbreviation"]: f"{int(away_t['fgm'])}/{int(away_t['fga'])} ({float(away_t['fgm'])/max(float(away_t['fga']), 1.0)*100:.1f}%)",
+                            home_t["team_abbreviation"]: f"{int(home_t['fgm'])}/{int(home_t['fga'])} ({float(home_t['fgm'])/max(float(home_t['fga']), 1.0)*100:.1f}%)",
+                        },
+                        {
+                            "Category": "3-Pointers (3PM / 3PA)",
+                            away_t["team_abbreviation"]: f"{int(away_t['fg3_m'])}/{int(away_t['fg3_a'])} ({float(away_t['fg3_m'])/max(float(away_t['fg3_a']), 1.0)*100:.1f}%)",
+                            home_t["team_abbreviation"]: f"{int(home_t['fg3_m'])}/{int(home_t['fg3_a'])} ({float(home_t['fg3_m'])/max(float(home_t['fg3_a']), 1.0)*100:.1f}%)",
+                        },
+                        {
+                            "Category": "Free Throws (FTM / FTA)",
+                            away_t["team_abbreviation"]: f"{int(away_t['ftm'])}/{int(away_t['fta'])} ({float(away_t['ftm'])/max(float(away_t['fta']), 1.0)*100:.1f}%)",
+                            home_t["team_abbreviation"]: f"{int(home_t['ftm'])}/{int(home_t['fta'])} ({float(home_t['ftm'])/max(float(home_t['fta']), 1.0)*100:.1f}%)",
+                        },
+                        {
+                            "Category": "Rebounds / Assists",
+                            away_t["team_abbreviation"]: f"{int(away_t['rebounds'])} REB / {int(away_t['assists'])} AST",
+                            home_t["team_abbreviation"]: f"{int(home_t['rebounds'])} REB / {int(home_t['assists'])} AST",
+                        },
+                        {
+                            "Category": "Steals / Blocks / Turnovers",
+                            away_t["team_abbreviation"]: f"{int(away_t['steals'])} STL / {int(away_t['blocks'])} BLK / {int(away_t['turnovers'])} TOV",
+                            home_t["team_abbreviation"]: f"{int(home_t['steals'])} STL / {int(home_t['blocks'])} BLK / {int(home_t['turnovers'])} TOV",
+                        },
+                    ]
+                    st.dataframe(pd.DataFrame(team_comparison_rows), hide_index=True, use_container_width=True)
+
+                # 3. Individual Player Box Scores
+                df_players_all = pd.DataFrame(players_all)
+                for c in ["points", "rebounds", "assists", "steals", "blocks", "turnovers", "minutes_played", "fgm", "fga", "fg3_m", "fg3_a", "ftm", "fta", "true_shooting_pct"]:
+                    if c in df_players_all.columns:
+                        df_players_all[c] = pd.to_numeric(df_players_all[c], errors="coerce").fillna(0.0)
+
+                tab_away_roster, tab_home_roster = st.tabs(
+                    [f"🏀 {away_t['team_abbreviation']} Box Score", f"🏀 {home_t['team_abbreviation']} Box Score"]
+                )
+
+                box_cols = ["player_name", "minutes_played", "points", "rebounds", "assists", "steals", "blocks", "turnovers", "fgm", "fga", "fg3_m", "fg3_a", "ftm", "fta", "true_shooting_pct"]
+
+                with tab_away_roster:
+                    df_away_players = df_players_all[df_players_all["team_abbreviation"] == away_t["team_abbreviation"]][box_cols]
+                    st.dataframe(
+                        df_away_players.rename(columns={
+                            "player_name": "Player", "minutes_played": "MIN", "points": "PTS", "rebounds": "REB",
+                            "assists": "AST", "steals": "STL", "blocks": "BLK", "turnovers": "TOV",
+                            "fgm": "FGM", "fga": "FGA", "fg3_m": "3PM", "fg3_a": "3PA", "ftm": "FTM", "fta": "FTA",
+                            "true_shooting_pct": "TS%"
+                        }),
+                        hide_index=True,
+                        use_container_width=True,
+                        height=380,
+                    )
+
+                with tab_home_roster:
+                    df_home_players = df_players_all[df_players_all["team_abbreviation"] == home_t["team_abbreviation"]][box_cols]
+                    st.dataframe(
+                        df_home_players.rename(columns={
+                            "player_name": "Player", "minutes_played": "MIN", "points": "PTS", "rebounds": "REB",
+                            "assists": "AST", "steals": "STL", "blocks": "BLK", "turnovers": "TOV",
+                            "fgm": "FGM", "fga": "FGA", "fg3_m": "3PM", "fg3_a": "3PA", "ftm": "FTM", "fta": "FTA",
+                            "true_shooting_pct": "TS%"
+                        }),
+                        hide_index=True,
+                        use_container_width=True,
+                        height=380,
+                    )
+
+# ---------------------------------------------------------
+# TAB 5: SURGE TRACKER
 # ---------------------------------------------------------
 with tab_surges:
     st.markdown("### 🔥 Hot & Cold Scoring Surge Tracker")

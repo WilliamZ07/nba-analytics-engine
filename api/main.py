@@ -87,7 +87,7 @@ def list_players(
     search: str | None = Query(default=None, min_length=2, max_length=80),
     limit: Annotated[int, Query(ge=1, le=MAX_LIMIT)] = 1000,
 ) -> list[dict[str, Any]]:
-    search_term = f"%{search.strip()}%" if search else None
+    search_term = f"%{search.strip()}%" if search and search.strip() else None
     return fetch_all(
         """
         SELECT
@@ -149,7 +149,6 @@ def player_game_log(
     season: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}$"),
     limit: Annotated[int, Query(ge=1, le=MAX_LIMIT)] = 82,
 ) -> list[dict[str, Any]]:
-    """Return enriched player game logs with free throws, steals, blocks, and shooting splits."""
     return fetch_all(
         """
         SELECT
@@ -198,7 +197,6 @@ def player_splits(
     player_id: int,
     season: str = Query(default="2024-25", pattern=r"^\d{4}-\d{2}$"),
 ) -> list[dict[str, Any]]:
-    """Return contextual splits including Steals and Blocks by Location, Outcome, and Opponent Defensive Tier."""
     return fetch_all(
         """
         WITH ranked_defenses AS (
@@ -317,34 +315,6 @@ def list_teams(
     )
 
 
-@app.get("/teams/{team_id}/leaders", tags=["teams"])
-@cache_endpoint(ttl_seconds=3600)
-def team_stat_leaders(
-    team_id: int,
-    season: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}$"),
-    limit: Annotated[int, Query(ge=1, le=20)] = 5,
-) -> list[dict[str, Any]]:
-    return fetch_all(
-        """
-        SELECT
-            player_id,
-            player_name,
-            season_id,
-            games_played,
-            ppg,
-            rpg,
-            apg,
-            true_shooting_pct
-        FROM analytics.dim_player_season_summary
-        WHERE latest_team = (SELECT team_abbreviation FROM analytics.dim_team_summary WHERE team_id = %s LIMIT 1)
-          AND (%s IS NULL OR season_id = %s)
-        ORDER BY ppg DESC
-        LIMIT %s;
-        """,
-        (team_id, season, season, limit),
-    )
-
-
 @app.get("/teams/{team_id}/ratings", tags=["teams"])
 @cache_endpoint(ttl_seconds=3600)
 def team_advanced_ratings(
@@ -441,3 +411,148 @@ def surging_players(
         """,
         (season, limit),
     )
+
+
+@app.get("/games", tags=["games"])
+@cache_endpoint(ttl_seconds=1800)
+def list_games(
+    season: str = Query(default="2024-25", pattern=r"^\d{4}-\d{2}$"),
+    team: str | None = Query(default=None),
+    limit: Annotated[int, Query(ge=1, le=200)] = 60,
+) -> list[dict[str, Any]]:
+    """List completed games with scores, matchup, and pace metrics."""
+    team_clean = team.strip().upper() if team and team.strip() else None
+    return fetch_all(
+        """
+        WITH team_game_summary AS (
+            SELECT
+                p.game_id,
+                p.game_date,
+                p.season_id,
+                p.team_abbreviation,
+                p.matchup,
+                p.wl,
+                SUM(p.points) AS total_points,
+                CASE WHEN p.matchup LIKE '%%@%%' THEN 'AWAY' ELSE 'HOME' END AS location,
+                ft.game_possessions,
+                ft.pace,
+                ft.offensive_rating,
+                ft.defensive_rating
+            FROM analytics.player_game_stats p
+            LEFT JOIN analytics.fct_team_game_stats ft
+                ON p.game_id = ft.game_id AND p.team_id = ft.team_id
+            WHERE p.season_id = %s
+            GROUP BY
+                p.game_id, p.game_date, p.season_id, p.team_abbreviation,
+                p.matchup, p.wl, ft.game_possessions, ft.pace, ft.offensive_rating, ft.defensive_rating
+        ),
+        matched_games AS (
+            SELECT
+                h.game_id,
+                h.game_date,
+                h.season_id,
+                h.team_abbreviation AS home_team,
+                a.team_abbreviation AS away_team,
+                h.total_points AS home_score,
+                a.total_points AS away_score,
+                h.wl AS home_wl,
+                h.pace,
+                h.game_possessions,
+                h.offensive_rating AS home_off_rtg,
+                a.offensive_rating AS away_off_rtg
+            FROM team_game_summary h
+            INNER JOIN team_game_summary a
+                ON h.game_id = a.game_id AND h.team_abbreviation != a.team_abbreviation
+            WHERE h.location = 'HOME'
+        )
+        SELECT *
+        FROM matched_games
+        WHERE (%s IS NULL OR home_team = %s OR away_team = %s)
+        ORDER BY game_date DESC, game_id DESC
+        LIMIT %s;
+        """,
+        (season, team_clean, team_clean, team_clean, limit),
+    )
+
+
+@app.get("/games/{game_id}/boxscore", tags=["games"])
+@cache_endpoint(ttl_seconds=3600)
+def game_boxscore(game_id: str) -> dict[str, Any]:
+    """Return comprehensive single-game box score: team telemetry and all individual player lines."""
+    team_stats = fetch_all(
+        """
+        SELECT
+            p.game_id,
+            p.game_date,
+            p.season_id,
+            p.team_id,
+            p.team_abbreviation,
+            p.matchup,
+            p.wl,
+            SUM(p.points) AS points,
+            SUM(p.field_goals_made) AS fgm,
+            SUM(p.field_goals_attempted) AS fga,
+            SUM(p.three_pointers_made) AS fg3_m,
+            SUM(p.three_pointers_attempted) AS fg3_a,
+            SUM(p.free_throws_made) AS ftm,
+            SUM(p.free_throws_attempted) AS fta,
+            SUM(p.rebounds) AS rebounds,
+            SUM(p.assists) AS assists,
+            SUM(p.steals) AS steals,
+            SUM(p.blocks) AS blocks,
+            SUM(p.turnovers) AS turnovers,
+            CASE WHEN p.matchup LIKE '%%@%%' THEN 'AWAY' ELSE 'HOME' END AS location,
+            ft.game_possessions,
+            ft.pace,
+            ft.offensive_rating,
+            ft.defensive_rating
+        FROM analytics.player_game_stats p
+        LEFT JOIN analytics.fct_team_game_stats ft
+            ON p.game_id = ft.game_id AND p.team_id = ft.team_id
+        WHERE p.game_id = %s
+        GROUP BY
+            p.game_id, p.game_date, p.season_id, p.team_id, p.team_abbreviation,
+            p.matchup, p.wl, ft.game_possessions, ft.pace, ft.offensive_rating, ft.defensive_rating;
+        """,
+        (game_id,),
+    )
+
+    if not team_stats:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Game {game_id} not found.")
+
+    players = fetch_all(
+        """
+        SELECT
+            player_id,
+            player_name,
+            team_id,
+            team_abbreviation,
+            minutes_played,
+            points,
+            rebounds,
+            assists,
+            steals,
+            blocks,
+            turnovers,
+            field_goals_made AS fgm,
+            field_goals_attempted AS fga,
+            three_pointers_made AS fg3_m,
+            three_pointers_attempted AS fg3_a,
+            free_throws_made AS ftm,
+            free_throws_attempted AS fta,
+            ROUND(
+                points::NUMERIC / NULLIF(2.0 * (field_goals_attempted + 0.44 * free_throws_attempted), 0) * 100,
+                1
+            ) AS true_shooting_pct
+        FROM analytics.player_game_stats
+        WHERE game_id = %s
+        ORDER BY team_abbreviation, points DESC, minutes_played DESC;
+        """,
+        (game_id,),
+    )
+
+    return {
+        "game_id": game_id,
+        "teams": team_stats,
+        "players": players,
+    }
