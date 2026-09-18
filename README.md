@@ -71,10 +71,10 @@ The models were evaluated using chronological holdout validation (training on th
 | Task | Model | Metric | Value | Baseline |
 | :--- | :--- | :--- | :--- | :--- |
 | **Win Probability** | `StandardScaler` + `LogisticRegression(C=0.1)` | **Accuracy** | **70.70%** | Uncalibrated: ~59% |
-| | | **Brier Score** | **0.2032** | 0.2500 (Random guess) |
-| | | **ROC-AUC** | **0.7525** | Solid separation |
+| **Win Probability** | `StandardScaler` + `LogisticRegression(C=0.1)` | **Brier Score** | **0.2032** | 0.2500 (Random guess) |
+| **Win Probability** | `StandardScaler` + `LogisticRegression(C=0.1)` | **ROC-AUC** | **0.7525** | Solid separation |
 | **Point Margin** | `StandardScaler` + `Ridge(alpha=10.0)` | **MAE** | **13.04 pts** | Expected NBA spread variance |
-| | | **RMSE** | **16.13 pts** | Dampens outlier blowouts |
+| **Point Margin** | `StandardScaler` + `Ridge(alpha=10.0)` | **RMSE** | **16.13 pts** | Dampens outlier blowouts |
 
 ---
 
