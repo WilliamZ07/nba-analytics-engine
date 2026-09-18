@@ -88,7 +88,7 @@ nba-analytics-engine/
 
 ### 1. Clone & Start Containers
 ```bash
-git clone [https://github.com/yourusername/nba-analytics-engine.git](https://github.com/yourusername/nba-analytics-engine.git)
+git clone [https://github.com/WilliamZ07/nba-analytics-engine.git](https://github.com/WilliamZ07/nba-analytics-engine.git)
 cd nba-analytics-engine
 docker compose up -d
 ```
