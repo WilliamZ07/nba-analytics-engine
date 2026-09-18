@@ -2,8 +2,14 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
+from pathlib import Path
 from typing import Annotated, Any
+
+import joblib
+import numpy as np
+import pandas as pd
 import psycopg2
 from fastapi import FastAPI, HTTPException, Query, status
 from psycopg2.extras import RealDictCursor
@@ -24,11 +30,28 @@ MAX_LIMIT = 1000
 
 app = FastAPI(
     title="NBA Lakehouse API",
-    version="0.4.0",
-    description="Read-only endpoints backed by dbt-curated NBA analytics marts and Redis caching.",
+    version="0.5.0",
+    description="Read-only endpoints backed by dbt-curated NBA analytics marts, Redis caching, and ML forecasting.",
 )
 
 app.add_middleware(StructuredLoggingMiddleware)
+
+# ML Model Artifact Cache
+MODEL_BUNDLE_PATH = Path("ml/artifacts/nba_model_bundle.joblib")
+MODEL_BUNDLE: dict[str, Any] | None = None
+
+
+def get_model_bundle() -> dict[str, Any]:
+    """Load model bundle once into memory."""
+    global MODEL_BUNDLE
+    if MODEL_BUNDLE is None:
+        if not MODEL_BUNDLE_PATH.exists():
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Model bundle artifact not found. Please run ml/train_model.py first.",
+            )
+        MODEL_BUNDLE = joblib.load(MODEL_BUNDLE_PATH)
+    return MODEL_BUNDLE
 
 
 def fetch_all(query: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
@@ -53,7 +76,7 @@ def fetch_all(query: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
 
 @app.get("/", tags=["platform"])
 def read_root() -> dict[str, str]:
-    return {"status": "healthy", "service": "nba-lakehouse-api", "version": "0.4.0"}
+    return {"status": "healthy", "service": "nba-lakehouse-api", "version": "0.5.0"}
 
 
 @app.get("/health", tags=["platform"])
@@ -79,6 +102,19 @@ def flush_cache() -> dict[str, str]:
         return {"status": "cleared", "keys_removed": str(len(keys))}
     return {"status": "bypassed", "detail": "cache unavailable"}
 
+
+@app.get("/seasons", tags=["platform"])
+@cache_endpoint(ttl_seconds=86400)
+def list_available_seasons() -> list[str]:
+    """Return all distinct season IDs present in the warehouse sorted newest to oldest."""
+    rows = fetch_all(
+        """
+        SELECT DISTINCT season_id
+        FROM analytics.dim_team_summary
+        ORDER BY season_id DESC;
+        """
+    )
+    return [r["season_id"] for r in rows if r["season_id"]]
 
 @app.get("/players", tags=["players"])
 @cache_endpoint(ttl_seconds=1800)
@@ -555,4 +591,129 @@ def game_boxscore(game_id: str) -> dict[str, Any]:
         "game_id": game_id,
         "teams": team_stats,
         "players": players,
+    }
+
+
+@app.get("/analytics/predict-matchup", tags=["analytics"])
+@cache_endpoint(ttl_seconds=600)
+def predict_matchup(
+    home_team: str = Query(..., min_length=2, max_length=5),
+    away_team: str = Query(..., min_length=2, max_length=5),
+    season: str = Query(default="2024-25", pattern=r"^\d{4}-\d{2}$"),
+    home_rest_days: int = Query(default=2, ge=0, le=7),
+    away_rest_days: int = Query(default=2, ge=0, le=7),
+) -> dict[str, Any]:
+    """Forecast game win probability and point margin using the trained ML model bundle."""
+    bundle = get_model_bundle()
+    clf = bundle["win_classifier"]
+    reg = bundle["spread_regressor"]
+    feature_cols = bundle["feature_columns"]
+
+    h_team = home_team.strip().upper()
+    a_team = away_team.strip().upper()
+
+    if h_team == a_team:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Home and away teams must be distinct.")
+
+    team_query = """
+        WITH recent_games AS (
+            SELECT
+                team_abbreviation,
+                game_date,
+                offensive_rating,
+                defensive_rating,
+                net_rating,
+                pace,
+                CASE WHEN wl = 'W' THEN 1.0 ELSE 0.0 END AS win_val,
+                ROW_NUMBER() OVER (ORDER BY game_date DESC, game_id DESC) AS rn
+            FROM analytics.fct_team_game_stats
+            WHERE team_abbreviation = %s AND season_id = %s
+        )
+        SELECT
+            ROUND(AVG(offensive_rating)::NUMERIC, 2) AS l10_off_rating,
+            ROUND(AVG(defensive_rating)::NUMERIC, 2) AS l10_def_rating,
+            ROUND(AVG(net_rating)::NUMERIC, 2) AS l10_net_rating,
+            ROUND(AVG(pace)::NUMERIC, 2) AS l10_pace,
+            ROUND(AVG(win_val)::NUMERIC, 3) AS l10_win_pct,
+            COUNT(*) AS sample_size
+        FROM recent_games
+        WHERE rn <= 10;
+    """
+
+    home_stats = fetch_all(team_query, (h_team, season))
+    away_stats = fetch_all(team_query, (a_team, season))
+
+    if not home_stats or home_stats[0]["sample_size"] == 0:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"No recent game data found for home team {h_team}.")
+    if not away_stats or away_stats[0]["sample_size"] == 0:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"No recent game data found for away team {a_team}.")
+
+    h = home_stats[0]
+    a = away_stats[0]
+
+    h_off = float(h["l10_off_rating"])
+    h_def = float(h["l10_def_rating"])
+    h_net = float(h["l10_net_rating"])
+    h_pace = float(h["l10_pace"])
+    h_win = float(h["l10_win_pct"])
+
+    a_off = float(a["l10_off_rating"])
+    a_def = float(a["l10_def_rating"])
+    a_net = float(a["l10_net_rating"])
+    a_pace = float(a["l10_pace"])
+    a_win = float(a["l10_win_pct"])
+
+    features = {
+        "rest_differential": home_rest_days - away_rest_days,
+        "is_home_back_to_back": 1 if home_rest_days == 0 else 0,
+        "is_away_back_to_back": 1 if away_rest_days == 0 else 0,
+        "home_l10_off_rating": h_off,
+        "home_l10_def_rating": h_def,
+        "home_l10_net_rating": h_net,
+        "home_l10_pace": h_pace,
+        "home_l10_win_pct": h_win,
+        "away_l10_off_rating": a_off,
+        "away_l10_def_rating": a_def,
+        "away_l10_net_rating": a_net,
+        "away_l10_pace": a_pace,
+        "away_l10_win_pct": a_win,
+        "net_rating_differential_l10": round(h_net - a_net, 2),
+        "home_off_vs_away_def_edge": round(h_off - a_def, 2),
+        "away_off_vs_home_def_edge": round(a_off - h_def, 2),
+        "projected_matchup_pace": round((h_pace + a_pace) / 2.0, 2),
+        "win_pct_differential_l10": round(h_win - a_win, 3),
+    }
+
+    df_features = pd.DataFrame([features])[feature_cols]
+
+    home_win_prob = float(clf.predict_proba(df_features)[0][1])
+    away_win_prob = round(1.0 - home_win_prob, 4)
+    predicted_margin = float(reg.predict(df_features)[0])
+
+    favored_team = h_team if home_win_prob >= 0.5 else a_team
+    spread_line = -abs(round(predicted_margin, 1)) if favored_team == h_team else abs(round(predicted_margin, 1))
+
+    return {
+        "matchup": f"{a_team} @ {h_team}",
+        "season": season,
+        "home_team": h_team,
+        "away_team": a_team,
+        "predictions": {
+            "home_win_probability": round(home_win_prob * 100, 1),
+            "away_win_probability": round(away_win_prob * 100, 1),
+            "predicted_point_margin": round(predicted_margin, 1),
+            "projected_spread": f"{favored_team} {spread_line:+.1f}",
+            "projected_pace": features["projected_matchup_pace"],
+        },
+        "model_telemetry": {
+            "test_accuracy": f"{bundle['metrics']['test_accuracy'] * 100:.1f}%",
+            "brier_score": f"{bundle['metrics']['brier_score']:.4f}",
+            "sample_size": bundle["train_sample_size"] + bundle["test_sample_size"],
+        },
+        "key_differentials": {
+            "l10_net_rating_edge": features["net_rating_differential_l10"],
+            "home_off_vs_away_def_edge": features["home_off_vs_away_def_edge"],
+            "away_off_vs_home_def_edge": features["away_off_vs_home_def_edge"],
+            "rest_differential": features["rest_differential"],
+        },
     }

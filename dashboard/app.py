@@ -70,13 +70,23 @@ def fetch_api_data(endpoint: str, params: dict[str, Any] | None = None) -> Any:
 
 
 # Sidebar Navigation
+# Sidebar Navigation
 with st.sidebar:
     st.markdown("## ⚡ **Baseline NBA**")
     st.caption("Lakehouse Analytics & Intelligence Engine")
     st.divider()
 
-    selected_season = st.selectbox("Season", options=["2024-25", "2023-24"], index=0)
+    # Query distinct seasons dynamically from lakehouse
+    available_seasons = fetch_api_data("/seasons")
+    if not available_seasons or not isinstance(available_seasons, list):
+        available_seasons = ["2024-25", "2023-24"]
 
+    selected_season = st.selectbox(
+        "Season",
+        options=available_seasons,
+        index=0,
+        help="Select any historical or active season loaded in the lakehouse."
+    )
     st.markdown("### Engine Controls")
     if st.button("🔄 Flush Redis Cache", use_container_width=True):
         try:
@@ -193,11 +203,11 @@ with tab_overview:
                 )
 
 # ---------------------------------------------------------
-# TAB 2: HEAD-TO-HEAD TALE OF THE TAPE
+# TAB 2: HEAD-TO-HEAD TALE OF THE TAPE & ML PROJECTION
 # ---------------------------------------------------------
 with tab_matchup:
     if not df_ratings.empty:
-        st.markdown("### Matchup Tale of the Tape")
+        st.markdown("### Matchup Tale of the Tape & Predictive Engine")
         team_list = sorted(df_ratings["team_abbreviation"].tolist())
         col_sel1, col_vs, col_sel2 = st.columns([4, 1, 4])
         with col_sel1:
@@ -217,7 +227,7 @@ with tab_matchup:
                 with logo_col:
                     st.image(get_team_logo_url(team_a), width=100)
                 with text_col:
-                    st.markdown(f"## **{team_a}**")
+                    st.markdown(f"## **{team_a}** *(Home)*")
                     st.markdown(f"**Record:** {int(t_a['wins'])}-{int(t_a['losses'])} &nbsp;|&nbsp; **Win %:** {t_a['win_percentage'] * 100:.1f}%")
                     st.markdown(f"**Adj Net Rating:** `{t_a['adjusted_net_rating']:+.2f}`")
 
@@ -227,9 +237,48 @@ with tab_matchup:
                 with logo_col:
                     st.image(get_team_logo_url(team_b), width=100)
                 with text_col:
-                    st.markdown(f"## **{team_b}**")
+                    st.markdown(f"## **{team_b}** *(Away)*")
                     st.markdown(f"**Record:** {int(t_b['wins'])}-{int(t_b['losses'])} &nbsp;|&nbsp; **Win %:** {t_b['win_percentage'] * 100:.1f}%")
                     st.markdown(f"**Adj Net Rating:** `{t_b['adjusted_net_rating']:+.2f}`")
+
+        # ML PREDICTION CARD
+        prediction_payload = fetch_api_data(
+            "/analytics/predict-matchup",
+            params={"home_team": team_a, "away_team": team_b, "season": selected_season},
+        )
+
+        if prediction_payload and "predictions" in prediction_payload:
+            preds = prediction_payload["predictions"]
+            meta = prediction_payload["model_telemetry"]
+            diffs = prediction_payload["key_differentials"]
+
+            home_win_pct = preds["home_win_probability"]
+            away_win_pct = preds["away_win_probability"]
+            spread = preds["projected_spread"]
+
+            with st.container(border=True):
+                st.markdown("#### 🤖 Machine Learning Pre-Game Forecast")
+
+                mp1, mp2, mp3 = st.columns([3, 2, 2])
+                with mp1:
+                    st.markdown("**Win Probability Distribution**")
+                    st.progress(home_win_pct / 100.0)
+                    st.caption(f"**{team_a}**: `{home_win_pct:.1f}%` &nbsp;|&nbsp; **{team_b}**: `{away_win_pct:.1f}%`")
+                with mp2:
+                    st.metric("Projected Spread", spread, f"{preds['predicted_point_margin']:+.1f} Net Margin")
+                with mp3:
+                    st.metric("Projected Game Pace", f"{preds['projected_pace']:.1f}", f"L10 Net Edge: {diffs['l10_net_rating_edge']:+.1f}")
+
+                # Clean diagnostic drawer
+                with st.expander("ℹ️ Model Architecture & Validation Telemetry"):
+                    st.markdown(
+                        f"""
+                        - **Sample Size:** `{meta['sample_size']}` regular season games (mature 10-game baseline)
+                        - **Chronological Holdout Accuracy:** `{meta['test_accuracy']}`
+                        - **Brier Score:** `{meta['brier_score']}` *(Lower is better; 0.25 is random coin flip)*
+                        - **Primary Regressors:** Calibrated Logistic Regression + Ridge Margin Estimator
+                        """
+                    )
 
         with st.container(border=True):
             st.markdown("#### Head-to-Head Metric Comparison")
@@ -486,7 +535,6 @@ with tab_boxscore:
         team_options = ["ALL"] + sorted(df_ratings["team_abbreviation"].tolist()) if not df_ratings.empty else ["ALL"]
         filter_team = st.selectbox("Filter Games by Team", options=team_options, index=0)
 
-    # Clean parameter construction: omit 'team' when filter is ALL
     game_query_params: dict[str, Any] = {"season": selected_season, "limit": 60}
     if filter_team != "ALL":
         game_query_params["team"] = filter_team
@@ -502,7 +550,6 @@ with tab_boxscore:
         }
 
         with col_f_game:
-            # Setting index=None leaves the dropdown unselected by default
             selected_game_label = st.selectbox(
                 "Select Matchup",
                 options=list(game_options.keys()),
@@ -510,7 +557,6 @@ with tab_boxscore:
                 placeholder="Choose a game to inspect box score and player telemetry...",
             )
 
-        # Default Empty State
         if not selected_game_label:
             with st.container(border=True):
                 st.markdown(
@@ -533,7 +579,6 @@ with tab_boxscore:
                 away_t = next((t for t in teams_meta if t["location"] == "AWAY"), teams_meta[0])
                 home_t = next((t for t in teams_meta if t["location"] == "HOME"), teams_meta[1] if len(teams_meta) > 1 else teams_meta[0])
 
-                # 1. Mini Scoreboard Banner
                 with st.container(border=True):
                     col_away_s, col_mid_s, col_home_s = st.columns([3, 2, 3])
 
@@ -568,7 +613,6 @@ with tab_boxscore:
                         with c_logo:
                             st.image(get_team_logo_url(home_t["team_abbreviation"]), width=85)
 
-                # 2. Team Comparative Shooting & Turnover Table
                 with st.container(border=True):
                     st.markdown("#### Team Shooting & Turnover Totals")
                     team_comparison_rows = [
@@ -600,7 +644,6 @@ with tab_boxscore:
                     ]
                     st.dataframe(pd.DataFrame(team_comparison_rows), hide_index=True, use_container_width=True)
 
-                # 3. Individual Player Box Scores
                 df_players_all = pd.DataFrame(players_all)
                 for c in ["points", "rebounds", "assists", "steals", "blocks", "turnovers", "minutes_played", "fgm", "fga", "fg3_m", "fg3_a", "ftm", "fta", "true_shooting_pct"]:
                     if c in df_players_all.columns:

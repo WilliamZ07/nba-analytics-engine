@@ -1,0 +1,32 @@
+version: 2
+
+models:
+  - name: fct_game_features
+    description: "Matchup feature store table for training game outcome and point margin models."
+    columns:
+      - name: game_id
+        description: "Primary key of the game contest."
+        tests:
+          - unique
+          - not_null
+
+      - name: target_home_win
+        description: "Binary classification target (1 = Home Win, 0 = Away Win)."
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+
+      - name: target_point_margin
+        description: "Continuous regression target for point spread (home_points - away_points)."
+        tests:
+          - not_null
+
+      - name: is_mature_sample
+        description: "Flag indicating both teams have played at least 10 prior regular season games."
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
